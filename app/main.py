@@ -26,7 +26,7 @@ def get_air_quality_kazakhstan(step: float = 1):
 def get_air_quality_single(latitude: float = 20.0, longitude: float = 10.0):
     return fetch_air_quality(latitude, longitude)
 
-# @app.get("/health")
-# def get_health_recommendation(aqi: int):
-#     return fetch_health_recommendation(aqi)
+@app.get("/health_impact")
+def get_health_recommendation(aqi: int, pm10: float, pm25: float, no2: float, so2: float, o3: float):
+    return predict_health_impact(aqi, pm10, pm25, no2, so2, o3)
 

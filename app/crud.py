@@ -1,12 +1,14 @@
 import xarray as xr
 from shapely.geometry import Point, Polygon
 from app.schemas import AQIData, AQIResponse, AQIDataHourly
+from fastapi.encoders import jsonable_encoder
 import httpx
 from datetime import datetime, timedelta
 import fsspec
 import numpy as np
 import urllib.request
 import os
+import pickle
 
 
 from app.helper import *
@@ -16,6 +18,9 @@ client = httpx.Client(
     timeout=10.0,
     limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
 )
+
+with open('model.pkl', 'rb') as f:
+    model = pickle.load(f)
 
 def get_aqi_status(aqi: float) -> str:
     if aqi <= 50:
@@ -252,3 +257,20 @@ def fetch_air_quality(latitude, longitude) -> AQIDataHourly:
     )
     return result
 
+def predict_health_impact(aqi: int, pm10: float, pm25: float, no2: float, so2: float, o3: float):
+    """
+    Использует ML-модель для предсказания влияния AQI на здоровье.
+    """
+    if model is None:
+        return "ML model not loaded."
+    prediction = model.predict([[aqi, pm10, pm25, no2, so2, o3]])
+
+    # ✅ Преобразуем NumPy объект в Python тип
+    if isinstance(prediction, np.ndarray):
+        prediction = prediction.tolist()       # превращает [array([2])] → [2]
+    if isinstance(prediction, list) and len(prediction) == 1:
+        prediction = prediction[0]             # превращает [2] → 2
+    if isinstance(prediction, np.generic):     
+        prediction = prediction.item()         # превращает numpy.int64 → int
+
+    return {"prediction": prediction}
