@@ -25,7 +25,7 @@ def get_air_quality():
     
 @app.get('/air-quality/kazakhstan', response_model=AQIResponse)
 def get_air_quality_kazakhstan(step: float = 1):
-    return fetch_kazakhstan_air_quality(step)
+    return fetch_kazakhstan_air_quality()
     
 @app.get("/air-quality", response_model=AQIDataHourly)
 def get_air_quality_single(latitude: float = 20.0, longitude: float = 10.0):

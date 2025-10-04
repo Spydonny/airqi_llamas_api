@@ -1,7 +1,7 @@
 import xarray as xr
 from shapely.geometry import Point, Polygon
 from app.schemas import AQIData, AQIResponse, AQIDataHourly
-from fastapi.encoders import jsonable_encoder
+from app.thailand_polygon_detailed import THAILAND_POLYGON_DETAILED
 import httpx
 from datetime import datetime, timedelta
 import numpy as np
@@ -11,6 +11,7 @@ import pickle
 import logging
 from dotenv import load_dotenv
 from typing import List
+import random
 
 
 from app.helper import *
@@ -46,70 +47,65 @@ def frange(start: float, stop: float, step: float):
 # Упрощённый полигон Казахстана (для примера; лучше подставить полный из GeoJSON)
 from shapely.geometry import Polygon, Point
 
-# Полигон Бельгии (приближённый контур)
-BELGIUM_POLYGON = Polygon([
-    (2.51357303225, 51.1485061713),   # северо-запад (граница с Францией и Северным морем)
-    (3.31497114423, 51.3457809515),
-    (4.04707116051, 51.2672586127),
-    (4.97399132662, 51.4750237087),
-    (5.60697594567, 51.03729848897),  # северо-восток (граница с Нидерландами/Германией)
-    (6.15665815596, 50.803721015),
-    (6.04307335778, 50.1280516628),
-    (5.7824174333, 50.0903278672),
-    (5.67405195478, 49.5294835476),   # юго-восток (граница с Люксембургом)
-    (4.79922163252, 49.9853730332),
-    (4.28602298343, 49.9074966498),
-    (3.58818444176, 50.3789924180),
-    (2.56870071544, 50.4020917622),
-    (2.51357303225, 51.1485061713)    # замыкание полигона
-])
 
-def fetch_kazakhstan_air_quality(step: float = 0.5) -> AQIResponse:
-    """
-    Получаем качество воздуха внутри полигона Бельгии.
-    step - шаг сетки (в градусах).
-    """
-    lat_start, lat_end = 49.5, 51.5
-    lon_start, lon_end = 2.5, 6.5
+import random
+from shapely.geometry import Point
 
+# Pre-generate sample points only once (at module load or on first call)
+def generate_random_points_in_polygon(polygon, n_points=40, max_attempts=10000):
+    min_lon, min_lat, max_lon, max_lat = polygon.bounds
+    pts = []
+    attempts = 0
+    while len(pts) < n_points and attempts < max_attempts:
+        rand_lon = random.uniform(min_lon, max_lon)
+        rand_lat = random.uniform(min_lat, max_lat)
+        p = Point(rand_lon, rand_lat)
+        if polygon.contains(p):
+            pts.append(p)
+        attempts += 1
+    return pts
+
+# Suppose THAILAND_POLYGON_DETAILED is defined already
+SAMPLE_POINTS = generate_random_points_in_polygon(THAILAND_POLYGON_DETAILED, n_points=40)
+
+def fetch_kazakhstan_air_quality() -> AQIResponse:
+    """
+    Получаем качество воздуха по фиксированным случайным точкам внутри полигона Таиланда.
+    """
     result = []
-    for lat in frange(lat_start, lat_end, step):
-        for lon in frange(lon_start, lon_end, step):
-            point = Point(lon, lat)  # shapely: (x=lon, y=lat)
-            if not BELGIUM_POLYGON.contains(point):
-                continue
+    for p in SAMPLE_POINTS:
+        rand_lon = p.x
+        rand_lat = p.y
 
-            params = {
-                "latitude": lat,
-                "longitude": lon,
-                "current": [
-                    "european_aqi",
-                    "sulphur_dioxide",
-                    "pm10",
-                    "pm2_5",
-                    "carbon_monoxide",
-                    "nitrogen_dioxide",
-                ],
-            }
-            r = client.get("/air-quality", params=params)
-            if r.status_code != 200:
-                continue
-
-            data = r.json()
-            if "current" in data:
-                current_aqi = data["current"]["european_aqi"]
-                result.append(AQIData(
-                    latitude=data["latitude"],
-                    longitude=data["longitude"],
-                    aqi=current_aqi,
-                    pm10=data["current"].get("pm10"),
-                    pm2_5=data["current"].get("pm2_5"),
-                    co=data["current"].get("carbon_monoxide"),
-                    no2=data["current"].get("nitrogen_dioxide"),
-                    so2=data["current"].get("sulphur_dioxide"),
-                    status=get_aqi_status(current_aqi),
-                ))
-
+        params = {
+            "latitude": rand_lat,
+            "longitude": rand_lon,
+            "current": [
+                "european_aqi",
+                "sulphur_dioxide",
+                "pm10",
+                "pm2_5",
+                "carbon_monoxide",
+                "nitrogen_dioxide",
+            ],
+        }
+        r = client.get("/air-quality", params=params)
+        if r.status_code != 200:
+            continue
+        data = r.json()
+        if "current" in data:
+            current_aqi = data["current"]["european_aqi"]
+            result.append(AQIData(
+                latitude=data["latitude"],
+                longitude=data["longitude"],
+                aqi=current_aqi,
+                pm10=data["current"].get("pm10"),
+                pm2_5=data["current"].get("pm2_5"),
+                co=data["current"].get("carbon_monoxide"),
+                no2=data["current"].get("nitrogen_dioxide"),
+                so2=data["current"].get("sulphur_dioxide"),
+                status=get_aqi_status(current_aqi),
+            ))
     return AQIResponse(data=result)
 
 logging.basicConfig(
@@ -125,7 +121,6 @@ NASA_TOKEN = os.getenv("NASA_TOKEN")
 if not NASA_TOKEN:
     log.error("❌ NASA_TOKEN не найден в .env")
 HEADERS = {"Authorization": f"Bearer {NASA_TOKEN}"}
-
 
 def fetch_latest_nc_link(short_name: str) -> str:
     """Запрашивает последний .nc файл для данного short_name"""
@@ -154,7 +149,6 @@ def fetch_latest_nc_link(short_name: str) -> str:
         log.exception(f"❌ Ошибка при запросе {short_name}: {e}")
         return None
 
-
 def open_tempo_file(nc_url: str) -> xr.Dataset:
     """Скачивает и открывает NetCDF файл с проверками"""
     if not nc_url:
@@ -181,7 +175,6 @@ def open_tempo_file(nc_url: str) -> xr.Dataset:
         log.exception(f"⚠️ Ошибка открытия {filename}: {e}")
         return None
 
-
 def find_concentration_var(ds: xr.Dataset, pollutant: str) -> str:
     """Ищет подходящую переменную концентрации"""
     candidates = [
@@ -194,7 +187,6 @@ def find_concentration_var(ds: xr.Dataset, pollutant: str) -> str:
     else:
         log.warning(f"⚠️ Не найдено подходящее поле концентрации для {pollutant}")
         return None
-
 
 def fetch_global_aqi() -> List[dict]:
     datasets = {
@@ -277,7 +269,6 @@ def fetch_global_aqi() -> List[dict]:
     log.info(f"🏁 Готово! Всего точек: {len(results)}")
     return results
     
-
 def fetch_air_quality(latitude, longitude) -> AQIDataHourly:
     today = datetime.today().date()
     one_month_before = today - timedelta(days=14)
@@ -340,9 +331,8 @@ def predict_health_impact(aqi: float, pm10: float, pm2_5: float, no2: float, so2
     try:
         input_data = np.array([[aqi, pm10, pm2_5, no2, so2, o3]])
         prediction = model.predict(input_data)
-        return {
-            'prediction': prediction[0]
-        }
+        result = float(prediction[0])  # 🔹 преобразуем в стандартный float
+        return {"prediction": result}
     except Exception as e:
         log.exception(f"❌ Ошибка при предсказании влияния на здоровье: {e}")
         return {"error": "Prediction failed"}
