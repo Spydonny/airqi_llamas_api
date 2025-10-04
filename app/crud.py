@@ -6,6 +6,11 @@ import httpx
 from datetime import datetime, timedelta
 import numpy as np
 import os
+import requests
+import pickle
+import logging
+from dotenv import load_dotenv
+from typing import List
 
 
 from app.helper import *
@@ -328,3 +333,16 @@ def fetch_air_quality(latitude, longitude) -> AQIDataHourly:
     )
     return result
 
+def predict_health_impact(aqi: float, pm10: float, pm2_5: float, no2: float, so2: float, o3: float) -> dict:
+    """
+    Предсказывает влияние на здоровье на основе входных данных.
+    """
+    try:
+        input_data = np.array([[aqi, pm10, pm2_5, no2, so2, o3]])
+        prediction = model.predict(input_data)
+        return {
+            'prediction': prediction[0]
+        }
+    except Exception as e:
+        log.exception(f"❌ Ошибка при предсказании влияния на здоровье: {e}")
+        return {"error": "Prediction failed"}
