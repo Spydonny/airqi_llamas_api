@@ -1,15 +1,11 @@
 import xarray as xr
 from shapely.geometry import Point, Polygon
 from app.schemas import AQIData, AQIResponse, AQIDataHourly
+from fastapi.encoders import jsonable_encoder
 import httpx
 from datetime import datetime, timedelta
 import numpy as np
 import os
-import pickle
-import requests
-from typing import List
-import logging
-from dotenv import load_dotenv
 
 
 from app.helper import *
@@ -331,22 +327,4 @@ def fetch_air_quality(latitude, longitude) -> AQIDataHourly:
         o3=data["hourly"]["ozone"],
     )
     return result
-
-def predict_health_impact(aqi: int, pm10: float, pm25: float, no2: float, so2: float, o3: float):
-    """
-    Использует ML-модель для предсказания влияния AQI на здоровье.
-    """
-    if model is None:
-        return "ML model not loaded."
-    prediction = model.predict([[aqi, pm10, pm25, no2, so2, o3]])
-
-    # ✅ Преобразуем NumPy объект в Python тип
-    if isinstance(prediction, np.ndarray):
-        prediction = prediction.tolist()       # превращает [array([2])] → [2]
-    if isinstance(prediction, list) and len(prediction) == 1:
-        prediction = prediction[0]             # превращает [2] → 2
-    if isinstance(prediction, np.generic):     
-        prediction = prediction.item()         # превращает numpy.int64 → int
-
-    return {"prediction": prediction}
 
