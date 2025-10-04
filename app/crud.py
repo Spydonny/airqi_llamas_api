@@ -3,10 +3,13 @@ from shapely.geometry import Point, Polygon
 from app.schemas import AQIData, AQIResponse, AQIDataHourly
 import httpx
 from datetime import datetime, timedelta
-import fsspec
 import numpy as np
-import urllib.request
 import os
+import pickle
+import requests
+from typing import List
+import logging
+from dotenv import load_dotenv
 
 
 from app.helper import *
@@ -16,6 +19,9 @@ client = httpx.Client(
     timeout=10.0,
     limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
 )
+
+with open('model.pkl', 'rb') as f:
+    model = pickle.load(f)
 
 def get_aqi_status(aqi: float) -> str:
     if aqi <= 50:
@@ -105,97 +111,171 @@ def fetch_kazakhstan_air_quality(step: float = 0.5) -> AQIResponse:
 
     return AQIResponse(data=result)
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("NASA_AQI")
 
-def fetch_global_aqi() -> list[AQIData]:
-    """
-    Загружает глобальные данные качества воздуха из NetCDF-источника (GEOS-CF)
-    и рассчитывает AQI по всей сетке.
-    """
+# === Загрузка токена ===
+load_dotenv()
+NASA_TOKEN = os.getenv("NASA_TOKEN")
+if not NASA_TOKEN:
+    log.error("❌ NASA_TOKEN не найден в .env")
+HEADERS = {"Authorization": f"Bearer {NASA_TOKEN}"}
 
-    url = "https://portal.nccs.nasa.gov/datashare/gmao/geos-cf/v1/das/Y2025/M10/D03/GEOS-CF.v01.rpl.aqc_tavg_1hr_g1440x721_v1.20251003_0030z.nc4"
-    filename = os.path.basename(url)
 
-    # 1️⃣ Скачать файл локально, если его ещё нет
+def fetch_latest_nc_link(short_name: str) -> str:
+    """Запрашивает последний .nc файл для данного short_name"""
+    try:
+        url = "https://cmr.earthdata.nasa.gov/search/granules.json"
+        params = {"short_name": short_name, "page_size": 1, "sort_key": "-start_date"}
+        res = requests.get(url, headers=HEADERS, params=params)
+        res.raise_for_status()
+
+        data = res.json()
+        entries = data.get("feed", {}).get("entry", [])
+        if not entries:
+            log.warning(f"🚫 Нет записей для {short_name}")
+            return None
+
+        links = entries[0].get("links", [])
+        nc = next((l["href"] for l in links if l["href"].endswith(".nc")), None)
+
+        if nc:
+            log.info(f"✅ Найден .nc файл для {short_name}: {nc}")
+        else:
+            log.warning(f"⚠️ Для {short_name} нет ссылок на .nc")
+        return nc
+
+    except Exception as e:
+        log.exception(f"❌ Ошибка при запросе {short_name}: {e}")
+        return None
+
+
+def open_tempo_file(nc_url: str) -> xr.Dataset:
+    """Скачивает и открывает NetCDF файл с проверками"""
+    if not nc_url:
+        return None
+
+    filename = os.path.basename(nc_url)
     if not os.path.exists(filename):
-        print(f"Скачиваю {filename} ...")
-        urllib.request.urlretrieve(url, filename)
+        log.info(f"⬇️ Скачиваю {filename}")
+        try:
+            res = requests.get(nc_url, headers=HEADERS)
+            res.raise_for_status()
+            with open(filename, "wb") as f:
+                f.write(res.content)
+            log.info(f"✅ Файл сохранён: {filename}")
+        except Exception as e:
+            log.exception(f"❌ Ошибка при скачивании {filename}: {e}")
+            return None
 
-    # 2️⃣ Открыть файл через xarray
-    ds = xr.open_dataset(filename, engine="netcdf4")
+    try:
+        ds = xr.open_dataset(filename, engine="netcdf4")
+        log.info(f"📂 Файл успешно открыт: {filename}")
+        return ds
+    except Exception as e:
+        log.exception(f"⚠️ Ошибка открытия {filename}: {e}")
+        return None
 
-    # 3️⃣ Проверяем наличие доступных переменных
-    var_map = {
-        "pm2_5": ["PM25_RH35_GCC", "pm2p5_conc", "PM25", "PM2_5"],
-        "pm10": ["PM10", "pm10_conc"],
-        "no2":  ["NO2", "no2_conc"],
-        "so2":  ["SO2", "so2_conc"],
-        "co":   ["CO", "co_conc"]
+
+def find_concentration_var(ds: xr.Dataset, pollutant: str) -> str:
+    """Ищет подходящую переменную концентрации"""
+    candidates = [
+        v for v in ds.data_vars
+        if any(k in v.lower() for k in [pollutant, "column", "conc", "vmr", "amount"])
+    ]
+    if candidates:
+        log.info(f"🔍 Для {pollutant.upper()} найдено поле: {candidates[0]}")
+        return candidates[0]
+    else:
+        log.warning(f"⚠️ Не найдено подходящее поле концентрации для {pollutant}")
+        return None
+
+
+def fetch_global_aqi() -> List[dict]:
+    datasets = {
+        "no2": "TEMPO_NO2_L2_NRT",
+        "so2": "TEMPO_SO2_L2_NRT",
+        "co": "TEMPO_CO_L2_NRT",
+        "pm2_5": "TEMPO_PM25_L2_NRT",
+        "pm10": "TEMPO_PM10_L2_NRT",
     }
 
-    resolved_vars = {}
-
-    for key, options in var_map.items():
-        for v in options:
-            if v in ds.data_vars:
-                resolved_vars[key] = v
-                break
-        else:
-            print(f"⚠️ Переменная для {key} не найдена в наборе данных")
-
-    # Проверим, что хотя бы PM2.5 есть
-    if "pm2_5" not in resolved_vars:
-        raise ValueError("PM2.5 data not found in dataset — cannot compute AQI")
-
-    # 4️⃣ Извлекаем данны
-
     data = {}
-    for pollutant, var_name in resolved_vars.items():
-        data[pollutant] = ds[var_name].isel(time=0, lev=0).values
+    coords = None
 
-    lats = ds["lat"].values
-    lons = ds["lon"].values
+    for pol, short_name in datasets.items():
+        log.info(f"\n🌍 Обрабатываю {pol.upper()} ...")
+        nc_link = fetch_latest_nc_link(short_name)
+        if not nc_link:
+            continue
 
-    # 5️⃣ Рассчитываем AQI по каждому загрязнителю
-    pollutant_aqi = {}
-    for pol, arr in data.items():
-        # Для каждого загрязнителя используем свои пороги
-        if pol in BREAKPOINTS:
-            pollutant_aqi[pol] = np.vectorize(lambda c: calc_aqi(c, BREAKPOINTS[pol]))(arr)
-        else:
-            pollutant_aqi[pol] = np.full_like(arr, np.nan)
+        ds = open_tempo_file(nc_link)
+        if ds is None:
+            continue
 
-    # 6️⃣ Общий AQI — максимум среди всех загрязнителей
-    stacked = np.stack(list(pollutant_aqi.values()), axis=0)
-    overall_aqi = np.nanmax(stacked, axis=0)
+        var = find_concentration_var(ds, pol)
+        if not var:
+            ds.close()
+            continue
 
-    # 7️⃣ Конвертируем в список AQIData
+        try:
+            # Берём первый временной слой, если есть
+            if "time" in ds[var].dims:
+                arr = ds[var].isel(time=0).values
+                log.info(f"🕐 Выбран первый временной слой для {pol.upper()}")
+            else:
+                arr = ds[var].values
+        except Exception as e:
+            log.exception(f"❌ Ошибка извлечения данных {pol}: {e}")
+            ds.close()
+            continue
+
+        lat_name = next((n for n in ["lat", "latitude", "Latitude"] if n in ds), None)
+        lon_name = next((n for n in ["lon", "longitude", "Longitude"] if n in ds), None)
+
+        if lat_name and lon_name:
+            coords = (ds[lat_name].values, ds[lon_name].values)
+            log.info(f"🗺️ Координаты найдены ({lat_name}, {lon_name})")
+
+        log.info(f"✅ {pol.upper()} данные получены: shape={arr.shape}")
+        data[pol] = arr
+        ds.close()
+
+    if not data:
+        log.error("❌ Не удалось загрузить данные ни для одного загрязнителя")
+        raise ValueError("Нет данных для AQI")
+
+    # Приведение размеров
+    shapes = [v.shape for v in data.values()]
+    min_shape = tuple(np.min(shapes, axis=0))
+    if len(set(shapes)) > 1:
+        log.warning(f"⚠️ Разные размеры сеток {shapes}, обрезаем до {min_shape}")
+
+    for k in data:
+        if data[k].shape != min_shape:
+            data[k] = data[k][:min_shape[0], :min_shape[1]]
+
+    # Здесь можно добавить расчёт AQI
+    log.info("✅ Все данные успешно собраны, готовим результат...")
+
+    lats, lons = coords if coords else (np.arange(min_shape[0]), np.arange(min_shape[1]))
     results = []
+
     for i, lat in enumerate(lats):
         for j, lon in enumerate(lons):
-            aqi_val = overall_aqi[i, j]
-            if np.isnan(aqi_val):
-                continue  # пропускаем точки без данных
+            results.append({
+                "lat": float(lat),
+                "lon": float(lon),
+                **{p: float(data[p][i, j]) if p in data else None for p in data.keys()}
+            })
 
-            # Безопасное преобразование с NaN → None
-            def safe_float(x):
-                return float(x) if x is not None and not np.isnan(x) else None
-
-            results.append(
-                AQIData(
-                    latitude=float(lat),
-                    longitude=float(lon),
-                    aqi=safe_float(aqi_val),
-                    status=get_aqi_status(aqi_val),
-                    pm10=safe_float(data["pm10"][i, j]) if "pm10" in data else None,
-                    pm2_5=safe_float(data["pm2_5"][i, j]),
-                    co=safe_float(data["carbon_monoxide"][i, j]) if "carbon_monoxide" in data else None,
-                    no2=safe_float(data["nitrogen_dioxide"][i, j]) if "nitrogen_dioxide" in data else None,
-                    so2=safe_float(data["sulphur_dioxide"][i, j]) if "sulphur_dioxide" in data else None,
-                )
-            )
-    ds.close()
+    log.info(f"🏁 Готово! Всего точек: {len(results)}")
     return results
-
+    
 
 def fetch_air_quality(latitude, longitude) -> AQIDataHourly:
     today = datetime.today().date()
@@ -251,4 +331,22 @@ def fetch_air_quality(latitude, longitude) -> AQIDataHourly:
         o3=data["hourly"]["ozone"],
     )
     return result
+
+def predict_health_impact(aqi: int, pm10: float, pm25: float, no2: float, so2: float, o3: float):
+    """
+    Использует ML-модель для предсказания влияния AQI на здоровье.
+    """
+    if model is None:
+        return "ML model not loaded."
+    prediction = model.predict([[aqi, pm10, pm25, no2, so2, o3]])
+
+    # ✅ Преобразуем NumPy объект в Python тип
+    if isinstance(prediction, np.ndarray):
+        prediction = prediction.tolist()       # превращает [array([2])] → [2]
+    if isinstance(prediction, list) and len(prediction) == 1:
+        prediction = prediction[0]             # превращает [2] → 2
+    if isinstance(prediction, np.generic):     
+        prediction = prediction.item()         # превращает numpy.int64 → int
+
+    return {"prediction": prediction}
 
