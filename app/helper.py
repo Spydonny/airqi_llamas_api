@@ -59,3 +59,139 @@ BREAKPOINTS = {
         {"C_lo": 0.505, "C_hi": 0.604, "I_lo": 401, "I_hi": 500},
     ],
 }
+
+from tensorflow.keras.models import load_model
+
+# === Параметры должны совпадать с обучением ===
+LOOKBACK = 24  # окно в часах (как в обучении)
+FEATURE_COLS = [
+    "pm2p5_Measurement",
+    "pm10_Measurement",
+    "so2_Measurement",
+    "o3_Measurement",
+    "no2_Measurement",
+    "AQI",
+    "station_id_encoded",
+]
+
+TARGETS = [
+    "pm2p5_Measurement_next_hour",
+    "pm10_Measurement_next_hour",
+    "so2_Measurement_next_hour",
+    "o3_Measurement_next_hour",
+    "no2_Measurement_next_hour",
+    "AQI_next_hour",
+]
+
+# === Загрузка LSTM и скейлеров ===
+# Папку/имена файлов поменяй под себя
+LSTM_PATH = "models/pollution_lstm_model.h5"   # или .keras
+SCALER_X_PATH = "models/scaler_X.pkl"
+SCALER_Y_PATH = "models/scaler_y.pkl"
+LABEL_ENCODER_PATH = "models/label_encoder.pkl"  # если использовал
+
+try:
+    lstm_model = load_model(LSTM_PATH)
+    scaler_X = joblib.load(SCALER_X_PATH)
+    scaler_Y = joblib.load(SCALER_Y_PATH)
+    le = joblib.load(LABEL_ENCODER_PATH)
+    log.info("✅ LSTM-модель и скейлеры загружены")
+except Exception as e:
+    log.exception(f"❌ Не удалось загрузить LSTM/скейлеры: {e}")
+    lstm_model, scaler_X, scaler_Y, le = None, None, None, None
+
+
+# === AQI (US EPA) — как рассчитывали при обучении ===
+def calc_us_aqi(pm25, pm10, so2, o3, no2):
+    # ВНИМАНИЕ по единицам: используй те же единицы, что и в обучении!
+    # (PM — μg/m3; O3/NO2/SO2 — те же, что в трейне)
+    bps = {
+        'pm25': [(0,12,0,50),(12.1,35.4,51,100),(35.5,55.4,101,150),(55.5,150.4,151,200),(150.5,250.4,201,300)],
+        'pm10': [(0,54,0,50),(55,154,51,100),(155,254,101,150),(255,354,151,200),(355,424,201,300)],
+        'so2':  [(0,35,0,50),(36,75,51,100),(76,185,101,150),(186,304,151,200)],
+        'o3':   [(0,0.054,0,50),(0.055,0.070,51,100),(0.071,0.085,101,150),(0.086,0.105,151,200)],
+        'no2':  [(0,53,0,50),(54,100,51,100),(101,360,101,150),(361,649,151,200)]
+    }
+    def ind(name, val):
+        if val is None or np.isnan(val):
+            return np.nan
+        for Cl, Ch, Il, Ih in bps[name]:
+            if Cl <= val <= Ch:
+                return ((Ih - Il) / (Ch - Cl)) * (val - Cl) + Il
+        return np.nan
+    vals = [
+        ind('pm25', pm25),
+        ind('pm10', pm10),
+        ind('so2', so2),
+        ind('o3',  o3),
+        ind('no2', no2),
+    ]
+    return np.nanmax(vals)
+
+def build_df_from_payload(payload, station_id: str) -> pd.DataFrame:
+    """
+    Собираем DataFrame из AQIDataHourly (твоя входящая структура) для одной станции,
+    рассчитываем AQI и код станции.
+    Ожидается, что списки синхронные и упорядочены по времени (часовая частота).
+    """
+    df = pd.DataFrame({
+        "pm10": payload.pm10,
+        "pm2_5": payload.pm2_5,
+        "co": payload.co,
+        "no2": payload.no2,
+        "so2": payload.so2,
+        "o3": payload.o3,
+    })
+    # Если у тебя есть timestamps — подставь; иначе сделаем фиктивный RangeIndex
+    # df["Timestamp_UTC"] = pd.to_datetime(payload.timestamps)  # если добавишь в схему
+    # df = df.sort_values("Timestamp_UTC")
+
+    # Переименуем в имена, с которыми обучалась модель
+    df = df.rename(columns={
+        "pm2_5": "pm2p5_Measurement",
+        "pm10": "pm10_Measurement",
+        "so2": "so2_Measurement",
+        "o3":  "o3_Measurement",
+        "no2": "no2_Measurement",
+    })
+
+    # AQI по строкам
+    df["AQI"] = [
+        calc_us_aqi(r["pm2p5_Measurement"], r["pm10_Measurement"], r["so2_Measurement"], r["o3_Measurement"], r["no2_Measurement"])
+        for _, r in df.iterrows()
+    ]
+
+    # station_id_encoded
+    station_code = le.transform([station_id])[0] if le else 0
+    df["station_id_encoded"] = station_code
+
+    # лёгкая интерполяция пропусков
+    for c in ["pm2p5_Measurement","pm10_Measurement","so2_Measurement","o3_Measurement","no2_Measurement","AQI"]:
+        df[c] = pd.Series(df[c]).interpolate(limit_direction="both")
+
+    return df
+
+def make_lstm_next_hour_forecast(df_last_hours: pd.DataFrame) -> Dict[str, Any]:
+    """
+    df_last_hours — последние LOOKBACK строк в точном порядке фичей.
+    Возвращает dict с предсказаниями на следующий час по всем TARGETS.
+    """
+    assert lstm_model is not None, "LSTM model is not loaded"
+    # берём последний срез длиной LOOKBACK
+    if len(df_last_hours) < LOOKBACK:
+        raise ValueError(f"Not enough history: need {LOOKBACK}, got {len(df_last_hours)}")
+
+    window = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].values  # shape (LOOKBACK, n_features)
+    X = window.reshape(1, LOOKBACK, len(FEATURE_COLS))
+
+    # масштабируем точно тем же scaler_X (внимание к reshape!)
+    X_scaled = scaler_X.transform(X.reshape(-1, X.shape[2])).reshape(X.shape)
+
+    # предикт
+    y_scaled = lstm_model.predict(X_scaled, verbose=0)
+    # иногда сеть чуть выходит за [0,1]
+    y_scaled = np.clip(y_scaled, 0.0, 1.0)
+
+    y_inv = scaler_Y.inverse_transform(y_scaled)[0]  # shape (6,)
+    result = {TARGETS[i]: float(y_inv[i]) for i in range(len(TARGETS))}
+    return result
