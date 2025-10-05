@@ -1,3 +1,15 @@
+import logging
+import pandas as pd
+from typing import Dict, Any
+from tensorflow.keras.models import load_model
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("NASA_AQI")
+
 def calc_aqi(C, breakpoints):
     for bp in breakpoints:
         if bp["C_lo"] <= C <= bp["C_hi"]:
@@ -59,8 +71,8 @@ BREAKPOINTS = {
         {"C_lo": 0.505, "C_hi": 0.604, "I_lo": 401, "I_hi": 500},
     ],
 }
-
-from tensorflow.keras.models import load_model
+import joblib
+import numpy as np
 
 # === Параметры должны совпадать с обучением ===
 LOOKBACK = 24  # окно в часах (как в обучении)

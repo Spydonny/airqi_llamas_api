@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from app.crud import *
-from app.schemas import AQIResponse
+from app.schemas import *
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 from dotenv import load_dotenv
@@ -41,10 +41,6 @@ def get_no2():
     params = {"short_name": "TEMPO_NO2_L2_NRT", "page_size": 1, "sort_key": "-start_date"}
     res = requests.get(url, headers=headers, params=params)
     return res.json()
-
-
-from app.schemas import AQIDataHourly, PredictResponse
-from app.crud import build_df_from_payload, make_lstm_next_hour_forecast, LOOKBACK
 
 @app.post("/predict/next-hour", response_model=PredictResponse)
 def predict_next_hour(payload: AQIDataHourly, station_id: str = "225573"):
