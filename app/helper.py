@@ -153,7 +153,6 @@ def build_df_from_payload(payload, station_id: str) -> pd.DataFrame:
         "so2": payload.so2,
         "o3": payload.o3,
     })
-    # Если у тебя есть timestamps — подставь; иначе сделаем фиктивный RangeIndex
     # df["Timestamp_UTC"] = pd.to_datetime(payload.timestamps)  # если добавишь в схему
     # df = df.sort_values("Timestamp_UTC")
 
@@ -166,17 +165,15 @@ def build_df_from_payload(payload, station_id: str) -> pd.DataFrame:
         "no2": "no2_Measurement",
     })
 
-    # AQI по строкам
+    # AQI
     df["AQI"] = [
         calc_us_aqi(r["pm2p5_Measurement"], r["pm10_Measurement"], r["so2_Measurement"], r["o3_Measurement"], r["no2_Measurement"])
         for _, r in df.iterrows()
     ]
 
-    # station_id_encoded
     station_code = le.transform([station_id])[0] if le else 0
     df["station_id_encoded"] = station_code
 
-    # лёгкая интерполяция пропусков
     for c in ["pm2p5_Measurement","pm10_Measurement","so2_Measurement","o3_Measurement","no2_Measurement","AQI"]:
         df[c] = pd.Series(df[c]).interpolate(limit_direction="both")
 
@@ -196,16 +193,14 @@ def make_lstm_next_hour_forecast(df_last_hours: pd.DataFrame) -> dict:
     # берём последние LOOKBACK строк и только нужные фичи
     work = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].copy()
 
-    # ❗ Подаём в scaler DataFrame с теми же именами колонок — уйдёт warning
     X_df = work.reset_index(drop=True)
-    X_scaled_2d = scaler_X.transform(X_df)                     # shape: (LOOKBACK, n_features)
+    X_scaled_2d = scaler_X.transform(X_df)
     X_scaled = X_scaled_2d.reshape(1, LOOKBACK, len(FEATURE_COLS))
 
     y_scaled = lstm_model.predict(X_scaled, verbose=0)
     y_scaled = np.clip(y_scaled, 0.0, 1.0)
     y_inv = scaler_Y.inverse_transform(y_scaled)[0]
 
-    # ❗ Кастим в обычный float — иначе Pydantic ругается на numpy.float32
     result = {
         "pm2p5_Measurement_next_hour": float(y_inv[TARGETS.index("pm2p5_Measurement_next_hour")]),
         "pm10_Measurement_next_hour":  float(y_inv[TARGETS.index("pm10_Measurement_next_hour")]),
@@ -230,7 +225,7 @@ def make_lstm_next_hour_forecast(df_last_hours: pd.DataFrame) -> dict:
 #     window = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].values  # shape (LOOKBACK, n_features)
 #     X = window.reshape(1, LOOKBACK, len(FEATURE_COLS))
 #
-#     # масштабируем точно тем же scaler_X (внимание к reshape!)
+#     # масштабируем точно тем же scaler_X
 #     X_scaled = scaler_X.transform(X.reshape(-1, X.shape[2])).reshape(X.shape)
 #
 #     # предикт
@@ -262,19 +257,18 @@ def make_lstm_multi_hour_forecast(df_last_hours: pd.DataFrame, n_hours: int) -> 
         y_scaled = np.clip(y_scaled, 0.0, 1.0)
         y_inv = scaler_Y.inverse_transform(y_scaled)[0]
 
-        # строка фичей следующего часа (для сдвига окна)
+        # строка фичей следующего часа
         next_row = {
             "pm2p5_Measurement": float(y_inv[TARGETS.index("pm2p5_Measurement_next_hour")]),
             "pm10_Measurement":  float(y_inv[TARGETS.index("pm10_Measurement_next_hour")]),
             "so2_Measurement":   float(y_inv[TARGETS.index("so2_Measurement_next_hour")]),
             "o3_Measurement":    float(y_inv[TARGETS.index("o3_Measurement_next_hour")]),
             "no2_Measurement":   float(y_inv[TARGETS.index("no2_Measurement_next_hour")]),
-            # можно взять из модели, либо пересчитать из поллютантов:
             "AQI":               float(y_inv[TARGETS.index("AQI_next_hour")]),
-            "station_id_encoded": float(st_code),  # обычный float/int
+            "station_id_encoded": float(st_code),
         }
 
-        # то, что вернём наружу (в “человеческих” ключах)
+        # то, что вернём наружу
         forecasts.append({
             "pm2p5_next_hour": next_row["pm2p5_Measurement"],
             "pm10_next_hour":  next_row["pm10_Measurement"],

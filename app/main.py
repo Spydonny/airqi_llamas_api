@@ -56,7 +56,7 @@ def predict_next_hour(payload: AQIDataHourly, station_id: str = "225573"):
             raise HTTPException(status_code=400, detail=f"Need at least {LOOKBACK} hourly points")
 
         pred = make_lstm_next_hour_forecast(df)
-        # Приведём ключи к понятным именам, как в response_model
+        # Приведём ключи как в response_model
         return PredictResponse(
             pm2p5_next_hour=pred["pm2p5_Measurement_next_hour"],
             pm10_next_hour=pred["pm10_Measurement_next_hour"],
@@ -68,7 +68,6 @@ def predict_next_hour(payload: AQIDataHourly, station_id: str = "225573"):
     except HTTPException:
         raise
     except Exception as e:
-        # вернём аккуратную ошибку
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
 
 
