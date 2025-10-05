@@ -182,79 +182,163 @@ def build_df_from_payload(payload, station_id: str) -> pd.DataFrame:
 
     return df
 
-def make_lstm_next_hour_forecast(df_last_hours: pd.DataFrame) -> Dict[str, Any]:
+
+def make_lstm_next_hour_forecast(df_last_hours: pd.DataFrame) -> dict:
     """
     df_last_hours — последние LOOKBACK строк в точном порядке фичей.
     Возвращает dict с предсказаниями на следующий час по всем TARGETS.
-    """
-    assert lstm_model is not None, "LSTM model is not loaded"
-    # берём последний срез длиной LOOKBACK
-    if len(df_last_hours) < LOOKBACK:
-        raise ValueError(f"Not enough history: need {LOOKBACK}, got {len(df_last_hours)}")
-
-    window = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].values  # shape (LOOKBACK, n_features)
-    X = window.reshape(1, LOOKBACK, len(FEATURE_COLS))
-
-    # масштабируем точно тем же scaler_X (внимание к reshape!)
-    X_scaled = scaler_X.transform(X.reshape(-1, X.shape[2])).reshape(X.shape)
-
-    # предикт
-    y_scaled = lstm_model.predict(X_scaled, verbose=0)
-    # иногда сеть чуть выходит за [0,1]
-    y_scaled = np.clip(y_scaled, 0.0, 1.0)
-
-    y_inv = scaler_Y.inverse_transform(y_scaled)[0]  # shape (6,)
-    result = {TARGETS[i]: float(y_inv[i]) for i in range(len(TARGETS))}
-    return result
-
-def make_lstm_multi_hour_forecast(df_last_hours: pd.DataFrame, n_hours: int) -> list[dict]:
-    """
-    Итеративный прогноз на n_hours вперёд.
-    df_last_hours: последние LOOKBACK строк с колонками FEATURE_COLS.
-    Возвращает список из n_hours словарей с ключами TARGETS.
     """
     if lstm_model is None or scaler_X is None or scaler_Y is None:
         raise RuntimeError("Model/scalers not loaded")
     if len(df_last_hours) < LOOKBACK:
         raise ValueError(f"Need at least {LOOKBACK} rows in history")
 
+    # берём последние LOOKBACK строк и только нужные фичи
+    work = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].copy()
+
+    # ❗ Подаём в scaler DataFrame с теми же именами колонок — уйдёт warning
+    X_df = work.reset_index(drop=True)
+    X_scaled_2d = scaler_X.transform(X_df)                     # shape: (LOOKBACK, n_features)
+    X_scaled = X_scaled_2d.reshape(1, LOOKBACK, len(FEATURE_COLS))
+
+    y_scaled = lstm_model.predict(X_scaled, verbose=0)
+    y_scaled = np.clip(y_scaled, 0.0, 1.0)
+    y_inv = scaler_Y.inverse_transform(y_scaled)[0]
+
+    # ❗ Кастим в обычный float — иначе Pydantic ругается на numpy.float32
+    result = {
+        "pm2p5_Measurement_next_hour": float(y_inv[TARGETS.index("pm2p5_Measurement_next_hour")]),
+        "pm10_Measurement_next_hour":  float(y_inv[TARGETS.index("pm10_Measurement_next_hour")]),
+        "so2_Measurement_next_hour":   float(y_inv[TARGETS.index("so2_Measurement_next_hour")]),
+        "o3_Measurement_next_hour":    float(y_inv[TARGETS.index("o3_Measurement_next_hour")]),
+        "no2_Measurement_next_hour":   float(y_inv[TARGETS.index("no2_Measurement_next_hour")]),
+        "AQI_next_hour":               float(y_inv[TARGETS.index("AQI_next_hour")]),
+    }
+    return result
+
+
+# def make_lstm_next_hour_forecast(df_last_hours: pd.DataFrame) -> Dict[str, Any]:
+#     """
+#     df_last_hours — последние LOOKBACK строк в точном порядке фичей.
+#     Возвращает dict с предсказаниями на следующий час по всем TARGETS.
+#     """
+#     assert lstm_model is not None, "LSTM model is not loaded"
+#     # берём последний срез длиной LOOKBACK
+#     if len(df_last_hours) < LOOKBACK:
+#         raise ValueError(f"Not enough history: need {LOOKBACK}, got {len(df_last_hours)}")
+#
+#     window = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].values  # shape (LOOKBACK, n_features)
+#     X = window.reshape(1, LOOKBACK, len(FEATURE_COLS))
+#
+#     # масштабируем точно тем же scaler_X (внимание к reshape!)
+#     X_scaled = scaler_X.transform(X.reshape(-1, X.shape[2])).reshape(X.shape)
+#
+#     # предикт
+#     y_scaled = lstm_model.predict(X_scaled, verbose=0)
+#     # иногда сеть чуть выходит за [0,1]
+#     y_scaled = np.clip(y_scaled, 0.0, 1.0)
+#
+#     y_inv = scaler_Y.inverse_transform(y_scaled)[0]  # shape (6,)
+#     result = {TARGETS[i]: float(y_inv[i]) for i in range(len(TARGETS))}
+#     return result
+
+
+def make_lstm_multi_hour_forecast(df_last_hours: pd.DataFrame, n_hours: int) -> list[dict]:
+    if lstm_model is None or scaler_X is None or scaler_Y is None:
+        raise RuntimeError("Model/scalers not loaded")
+    if len(df_last_hours) < LOOKBACK:
+        raise ValueError(f"Need at least {LOOKBACK} rows in history")
 
     work = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].copy().reset_index(drop=True)
-
-    forecasts = []
-
     st_code = work["station_id_encoded"].iloc[-1]
+    forecasts: list[dict] = []
 
     for _ in range(n_hours):
-        window = work.values.reshape(1, LOOKBACK, len(FEATURE_COLS))
-        X_scaled = scaler_X.transform(window.reshape(-1, window.shape[2])).reshape(window.shape)
+        X_df = work.copy()
+        X_scaled_2d = scaler_X.transform(X_df)
+        X_scaled = X_scaled_2d.reshape(1, LOOKBACK, len(FEATURE_COLS))
 
         y_scaled = lstm_model.predict(X_scaled, verbose=0)
         y_scaled = np.clip(y_scaled, 0.0, 1.0)
         y_inv = scaler_Y.inverse_transform(y_scaled)[0]
 
-    
-        next_feature_row = {
-            "pm2p5_Measurement": y_inv[TARGETS.index("pm2p5_Measurement_next_hour")],
-            "pm10_Measurement":  y_inv[TARGETS.index("pm10_Measurement_next_hour")],
-            "so2_Measurement":   y_inv[TARGETS.index("so2_Measurement_next_hour")],
-            "o3_Measurement":    y_inv[TARGETS.index("o3_Measurement_next_hour")],
-            "no2_Measurement":   y_inv[TARGETS.index("no2_Measurement_next_hour")],
-            # AQI — можно взять из модели (как обучали) ИЛИ пересчитать из предсказанных поллютантов
-            "AQI":               y_inv[TARGETS.index("AQI_next_hour")],
-            "station_id_encoded": st_code,
+        # строка фичей следующего часа (для сдвига окна)
+        next_row = {
+            "pm2p5_Measurement": float(y_inv[TARGETS.index("pm2p5_Measurement_next_hour")]),
+            "pm10_Measurement":  float(y_inv[TARGETS.index("pm10_Measurement_next_hour")]),
+            "so2_Measurement":   float(y_inv[TARGETS.index("so2_Measurement_next_hour")]),
+            "o3_Measurement":    float(y_inv[TARGETS.index("o3_Measurement_next_hour")]),
+            "no2_Measurement":   float(y_inv[TARGETS.index("no2_Measurement_next_hour")]),
+            # можно взять из модели, либо пересчитать из поллютантов:
+            "AQI":               float(y_inv[TARGETS.index("AQI_next_hour")]),
+            "station_id_encoded": float(st_code),  # обычный float/int
         }
 
-        step_pred = {
-            "pm2p5_next_hour": next_feature_row["pm2p5_Measurement"],
-            "pm10_next_hour":  next_feature_row["pm10_Measurement"],
-            "so2_next_hour":   next_feature_row["so2_Measurement"],
-            "o3_next_hour":    next_feature_row["o3_Measurement"],
-            "no2_next_hour":   next_feature_row["no2_Measurement"],
-            "AQI_next_hour":   next_feature_row["AQI"],
-        }
-        forecasts.append(step_pred)
+        # то, что вернём наружу (в “человеческих” ключах)
+        forecasts.append({
+            "pm2p5_next_hour": next_row["pm2p5_Measurement"],
+            "pm10_next_hour":  next_row["pm10_Measurement"],
+            "so2_next_hour":   next_row["so2_Measurement"],
+            "o3_next_hour":    next_row["o3_Measurement"],
+            "no2_next_hour":   next_row["no2_Measurement"],
+            "AQI_next_hour":   next_row["AQI"],
+        })
 
-        work = pd.concat([work.iloc[1:], pd.DataFrame([next_feature_row])], ignore_index=True)
+        # сдвиг окна
+        work = pd.concat([work.iloc[1:], pd.DataFrame([next_row])], ignore_index=True)
 
     return forecasts
+
+
+
+# def make_lstm_multi_hour_forecast(df_last_hours: pd.DataFrame, n_hours: int) -> list[dict]:
+#     """
+#     Итеративный прогноз на n_hours вперёд.
+#     df_last_hours: последние LOOKBACK строк с колонками FEATURE_COLS.
+#     Возвращает список из n_hours словарей с ключами TARGETS.
+#     """
+#     if lstm_model is None or scaler_X is None or scaler_Y is None:
+#         raise RuntimeError("Model/scalers not loaded")
+#     if len(df_last_hours) < LOOKBACK:
+#         raise ValueError(f"Need at least {LOOKBACK} rows in history")
+#
+#
+#     work = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].copy().reset_index(drop=True)
+#
+#     forecasts = []
+#
+#     st_code = work["station_id_encoded"].iloc[-1]
+#
+#     for _ in range(n_hours):
+#         window = work.values.reshape(1, LOOKBACK, len(FEATURE_COLS))
+#         X_scaled = scaler_X.transform(window.reshape(-1, window.shape[2])).reshape(window.shape)
+#
+#         y_scaled = lstm_model.predict(X_scaled, verbose=0)
+#         y_scaled = np.clip(y_scaled, 0.0, 1.0)
+#         y_inv = scaler_Y.inverse_transform(y_scaled)[0]
+#
+#
+#         next_feature_row = {
+#             "pm2p5_Measurement": y_inv[TARGETS.index("pm2p5_Measurement_next_hour")],
+#             "pm10_Measurement":  y_inv[TARGETS.index("pm10_Measurement_next_hour")],
+#             "so2_Measurement":   y_inv[TARGETS.index("so2_Measurement_next_hour")],
+#             "o3_Measurement":    y_inv[TARGETS.index("o3_Measurement_next_hour")],
+#             "no2_Measurement":   y_inv[TARGETS.index("no2_Measurement_next_hour")],
+#             # AQI — можно взять из модели (как обучали) ИЛИ пересчитать из предсказанных поллютантов
+#             "AQI":               y_inv[TARGETS.index("AQI_next_hour")],
+#             "station_id_encoded": st_code,
+#         }
+#
+#         step_pred = {
+#             "pm2p5_next_hour": next_feature_row["pm2p5_Measurement"],
+#             "pm10_next_hour":  next_feature_row["pm10_Measurement"],
+#             "so2_next_hour":   next_feature_row["so2_Measurement"],
+#             "o3_next_hour":    next_feature_row["o3_Measurement"],
+#             "no2_next_hour":   next_feature_row["no2_Measurement"],
+#             "AQI_next_hour":   next_feature_row["AQI"],
+#         }
+#         forecasts.append(step_pred)
+#
+#         work = pd.concat([work.iloc[1:], pd.DataFrame([next_feature_row])], ignore_index=True)
+#
+#     return forecasts
