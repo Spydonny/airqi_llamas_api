@@ -207,3 +207,55 @@ def make_lstm_next_hour_forecast(df_last_hours: pd.DataFrame) -> Dict[str, Any]:
     y_inv = scaler_Y.inverse_transform(y_scaled)[0]  # shape (6,)
     result = {TARGETS[i]: float(y_inv[i]) for i in range(len(TARGETS))}
     return result
+
+def make_lstm_multi_hour_forecast(df_last_hours: pd.DataFrame, n_hours: int) -> list[dict]:
+    """
+    Итеративный прогноз на n_hours вперёд.
+    df_last_hours: последние LOOKBACK строк с колонками FEATURE_COLS.
+    Возвращает список из n_hours словарей с ключами TARGETS.
+    """
+    if lstm_model is None or scaler_X is None or scaler_Y is None:
+        raise RuntimeError("Model/scalers not loaded")
+    if len(df_last_hours) < LOOKBACK:
+        raise ValueError(f"Need at least {LOOKBACK} rows in history")
+
+
+    work = df_last_hours.tail(LOOKBACK)[FEATURE_COLS].copy().reset_index(drop=True)
+
+    forecasts = []
+
+    st_code = work["station_id_encoded"].iloc[-1]
+
+    for _ in range(n_hours):
+        window = work.values.reshape(1, LOOKBACK, len(FEATURE_COLS))
+        X_scaled = scaler_X.transform(window.reshape(-1, window.shape[2])).reshape(window.shape)
+
+        y_scaled = lstm_model.predict(X_scaled, verbose=0)
+        y_scaled = np.clip(y_scaled, 0.0, 1.0)
+        y_inv = scaler_Y.inverse_transform(y_scaled)[0]
+
+    
+        next_feature_row = {
+            "pm2p5_Measurement": y_inv[TARGETS.index("pm2p5_Measurement_next_hour")],
+            "pm10_Measurement":  y_inv[TARGETS.index("pm10_Measurement_next_hour")],
+            "so2_Measurement":   y_inv[TARGETS.index("so2_Measurement_next_hour")],
+            "o3_Measurement":    y_inv[TARGETS.index("o3_Measurement_next_hour")],
+            "no2_Measurement":   y_inv[TARGETS.index("no2_Measurement_next_hour")],
+            # AQI — можно взять из модели (как обучали) ИЛИ пересчитать из предсказанных поллютантов
+            "AQI":               y_inv[TARGETS.index("AQI_next_hour")],
+            "station_id_encoded": st_code,
+        }
+
+        step_pred = {
+            "pm2p5_next_hour": next_feature_row["pm2p5_Measurement"],
+            "pm10_next_hour":  next_feature_row["pm10_Measurement"],
+            "so2_next_hour":   next_feature_row["so2_Measurement"],
+            "o3_next_hour":    next_feature_row["o3_Measurement"],
+            "no2_next_hour":   next_feature_row["no2_Measurement"],
+            "AQI_next_hour":   next_feature_row["AQI"],
+        }
+        forecasts.append(step_pred)
+
+        work = pd.concat([work.iloc[1:], pd.DataFrame([next_feature_row])], ignore_index=True)
+
+    return forecasts
