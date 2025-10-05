@@ -41,3 +41,34 @@ def get_no2():
     params = {"short_name": "TEMPO_NO2_L2_NRT", "page_size": 1, "sort_key": "-start_date"}
     res = requests.get(url, headers=headers, params=params)
     return res.json()
+
+
+from app.schemas import AQIDataHourly, PredictResponse
+from app.crud import build_df_from_payload, make_lstm_next_hour_forecast, LOOKBACK
+
+@app.post("/predict/next-hour", response_model=PredictResponse)
+def predict_next_hour(payload: AQIDataHourly, station_id: str = "225573"):
+    """
+    Принимает почасовые списки (как AQIDataHourly), берёт последние LOOKBACK часов,
+    готовит фичи и возвращает прогноз на следующий час (5 загрязнителей + AQI).
+    """
+    try:
+        df = build_df_from_payload(payload, station_id=station_id)
+        if len(df) < LOOKBACK:
+            raise HTTPException(status_code=400, detail=f"Need at least {LOOKBACK} hourly points")
+
+        pred = make_lstm_next_hour_forecast(df)
+        # Приведём ключи к понятным именам, как в response_model
+        return PredictResponse(
+            pm2p5_next_hour=pred["pm2p5_Measurement_next_hour"],
+            pm10_next_hour=pred["pm10_Measurement_next_hour"],
+            so2_next_hour=pred["so2_Measurement_next_hour"],
+            o3_next_hour=pred["o3_Measurement_next_hour"],
+            no2_next_hour=pred["no2_Measurement_next_hour"],
+            AQI_next_hour=pred["AQI_next_hour"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # вернём аккуратную ошибку
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
