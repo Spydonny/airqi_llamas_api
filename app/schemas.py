@@ -35,3 +35,7 @@ class PredictResponse(BaseModel):
     o3_next_hour: float
     no2_next_hour: float
     AQI_next_hour: float
+
+class MultiHourForecast(BaseModel):
+    horizon_hours: int
+    forecasts: list[dict]
