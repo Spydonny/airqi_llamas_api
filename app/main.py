@@ -4,6 +4,8 @@ from app.schemas import *
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 from dotenv import load_dotenv
+from app.schemas import AQIDataHourly, MultiHourForecast
+from app.helper import build_df_from_payload, make_lstm_multi_hour_forecast, LOOKBACK
 load_dotenv()
 
 app = FastAPI()
@@ -67,4 +69,21 @@ def predict_next_hour(payload: AQIDataHourly, station_id: str = "225573"):
         raise
     except Exception as e:
         # вернём аккуратную ошибку
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+
+
+@app.post("/predict/hours", response_model=MultiHourForecast)
+def predict_hours(payload: AQIDataHourly,
+                  station_id: str = "225573",
+                  n: int = Query(24, ge=1, le=168)):
+    """
+    Прогноз на n часов вперёд (итеративно).
+    """
+    try:
+        df = build_df_from_payload(payload, station_id=station_id)
+        if len(df) < LOOKBACK:
+            raise HTTPException(status_code=400, detail=f"Need at least {LOOKBACK} hourly points")
+        forecasts = make_lstm_multi_hour_forecast(df, n_hours=n)
+        return MultiHourForecast(horizon_hours=n, forecasts=forecasts)
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
