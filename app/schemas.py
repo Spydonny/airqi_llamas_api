@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 
 class AQIData(BaseModel):
@@ -27,3 +27,11 @@ class AQIDataHourly(BaseModel):
     no2: List[float] = None
     so2: List[float] = None
     o3: List[float] = None
+
+class PredictResponse(BaseModel):
+    pm2p5_next_hour: float
+    pm10_next_hour: float
+    so2_next_hour: float
+    o3_next_hour: float
+    no2_next_hour: float
+    AQI_next_hour: float
