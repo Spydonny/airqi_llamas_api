@@ -96,11 +96,9 @@ TARGETS = [
 ]
 
 # === Загрузка LSTM и скейлеров ===
-# Папку/имена файлов поменяй под себя
-LSTM_PATH = "models/pollution_lstm_model.h5"   # или .keras
-SCALER_X_PATH = "models/scaler_X.pkl"
-SCALER_Y_PATH = "models/scaler_y.pkl"
-LABEL_ENCODER_PATH = "models/label_encoder.pkl"  # если использовал
+LSTM_PATH = "pollution_lstm_model.h5"
+SCALER_X_PATH = "scaler_X.pkl"
+SCALER_Y_PATH = "scaler_y.pkl"
 
 try:
     lstm_model = load_model(LSTM_PATH)
