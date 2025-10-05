@@ -147,3 +147,4 @@ Desktop.ini
 *.pyo
 *.pyd
 *.pdb
+.idea/
