@@ -96,9 +96,10 @@ TARGETS = [
 ]
 
 # === Загрузка LSTM и скейлеров ===
-LSTM_PATH = "pollution_lstm_model.h5"
+LSTM_PATH = "pollution_lstm_model.keras"
 SCALER_X_PATH = "scaler_X.pkl"
 SCALER_Y_PATH = "scaler_y.pkl"
+LABEL_ENCODER_PATH = "le.pkl"
 
 try:
     lstm_model = load_model(LSTM_PATH)
